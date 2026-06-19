@@ -5,8 +5,9 @@ name = "pypi"
 
 [packages]
 paho-mqtt = "*"
+opencv-python = "*"
 
 [dev-packages]
 
 [requires]
-python_version = "3.14"
+python_version = "3.11"
