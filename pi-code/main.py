@@ -33,7 +33,7 @@ try:
     startInitialStations(state)
 
     # Wait until player 1 has been removed from the last station
-    while state["1"] < len(STATIONS):
+    while state["1"] < len(STATIONS) or state["2"] >= 0:
         time.sleep(0.1)
 
     # Players are now at the camera — scan year as many times as they like
