@@ -13,24 +13,34 @@ const char* mqttServer = "10.42.0.1";
 #define PWM_FREQ 1000
 #define PWM_RES  10            // duty 0..1023
 
+// Motor ramp config
+#define RAMP_UP_STEP    6      // duty added per tick going UP  (gentle = protects motor)
+#define RAMP_DOWN_STEP  30     // duty removed per tick going DOWN (quick = stays responsive)
+#define RAMP_INTERVAL   4      // ms between ramp ticks
+
 // NeoPixel (police siren) pin config
-#define DATAPIN  4
+#define DATAPIN  13
 #define MAX_LEDS 300           // buffer cap; real count set at runtime
 
 // MQTT topics
-const char* TOPIC_LEVEL = "carrera/level";   // shared level (Pi or track serial sets it; both boards follow)
+const char* TOPIC_LEVEL = "carrera/level";   // shared level (station/Pi sets it; both boards follow)
 const char* TOPIC_CMD   = "carrera/cmd";     // remote calibration (set / leds / bright / show)
 
 WiFiClient   esp;
 PubSubClient client(esp);
-Adafruit_NeoPixel strip(MAX_LEDS, DATAPIN, NEO_RGB + NEO_KHZ800);
+Adafruit_NeoPixel strip(MAX_LEDS, DATAPIN, NEO_GRB + NEO_KHZ800);
 Preferences  prefs;
 
 // Speed / calibration
-int  levelDuty[5] = {375, 405, 425, 455, 475};  // out of 1023
+int levelDuty[5] = {375, 405, 425, 455, 475};  // out of 1023
 int speedLevel   = 0;          // 0 = stop, 1..5 = speeds
 int numLeds      = 30;
 int brightness   = 250;
+
+// Motor ramp state
+int           targetDuty  = 0;
+int           currentDuty = 0;
+unsigned long lastRamp    = 0;
 
 // Siren animation
 uint8_t       sirenPhase = 0;
@@ -94,9 +104,20 @@ void renderSiren() {
 
 // Motor
 
-void applySpeed() {
-  int duty = (speedLevel == 0) ? 0 : levelDuty[speedLevel - 1];
-  ledcWrite(PWM_PIN, duty);
+void applySpeed() {              // just set the goal; rampMotor() walks toward it
+  targetDuty = (speedLevel == 0) ? 0 : levelDuty[speedLevel - 1];
+}
+
+void rampMotor() {
+  if (currentDuty == targetDuty) return;
+  if (currentDuty < targetDuty) {
+    currentDuty += RAMP_UP_STEP;
+    if (currentDuty > targetDuty) currentDuty = targetDuty;
+  } else {
+    currentDuty -= RAMP_DOWN_STEP;
+    if (currentDuty < targetDuty) currentDuty = targetDuty;
+  }
+  ledcWrite(PWM_PIN, currentDuty);
 }
 
 // Level helpers
@@ -132,6 +153,7 @@ void printConfig() {
   for (int i = 0; i < 5; i++)
     Serial.printf("  level %d -> duty %d (%d%%)\n", i + 1, levelDuty[i], levelDuty[i] * 100 / 1023);
   Serial.printf("  speed level : %d\n", speedLevel);
+  Serial.printf("  duty now/target : %d / %d\n", currentDuty, targetDuty);
   Serial.printf("  neopixels   : %d\n", numLeds);
   Serial.printf("  brightness  : %d\n", brightness);
 }
@@ -188,7 +210,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   String message;
   for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
 
-  // shared level from the Pi (or another board) -> apply locally, do NOT re-publish
+  // shared level from the station/Pi -> apply locally, do NOT re-publish
   if (String(topic) == TOPIC_LEVEL) {
     applyLevel(message.toInt());
     Serial.printf("level <- mqtt: %d\n", speedLevel);
@@ -205,7 +227,7 @@ void reconnect() {
     Serial.print("Attempting MQTT connection...");
     if (client.connect("carreraTrack")) {
       Serial.println("connected");
-      client.subscribe(TOPIC_LEVEL);   // follow shared level (Pi or track serial)
+      client.subscribe(TOPIC_LEVEL);   // follow shared level
       client.subscribe(TOPIC_CMD);     // remote calibration
     } else {
       Serial.print("failed, rc=");
@@ -241,6 +263,11 @@ void loop() {
 
   if (Serial.available()) handleLine(Serial.readStringUntil('\n'));
 
+  if (millis() - lastRamp >= RAMP_INTERVAL) {
+    lastRamp = millis();
+    rampMotor();
+  }
+
   if (millis() - lastFlash >= (unsigned long)sirenInterval()) {
     lastFlash = millis();
     sirenPhase = (sirenPhase + 1) % 8;
@@ -252,4 +279,9 @@ void loop() {
   CORE 2.x: swap the ledc calls for the channel API:
     const int CH = 0; ledcSetup(CH, PWM_FREQ, PWM_RES); ledcAttachPin(PWM_PIN, CH);
     then ledcWrite(CH, duty);
+
+  Ramp tuning:
+    - Slower/gentler start: lower RAMP_UP_STEP (e.g. 3) or raise RAMP_INTERVAL.
+    - Snappier start: raise RAMP_UP_STEP.
+    - Instant stop instead of quick ramp-down: set RAMP_DOWN_STEP to 1023.
 */
